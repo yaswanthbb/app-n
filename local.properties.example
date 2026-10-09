@@ -1,0 +1,10 @@
+# Copy to local.properties. Android Studio normally writes sdk.dir automatically.
+# sdk.dir=/absolute/path/to/Android/Sdk
+NEWS_API_KEY=PASTE_YOUR_GNEWS_KEY_HERE
+
+# Optional: private release signing. Without these, Gradle generates a local
+# signing key so assembleRelease still produces an installable APK.
+# RELEASE_STORE_FILE=/absolute/path/to/newsapp-release.jks
+# RELEASE_STORE_PASSWORD=your-private-password
+# RELEASE_KEY_ALIAS=newsapp
+# RELEASE_KEY_PASSWORD=your-private-password

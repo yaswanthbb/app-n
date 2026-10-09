@@ -1,0 +1,112 @@
+import asyncio
+from contextlib import asynccontextmanager, suppress
+import hmac
+import logging
+import os
+import time
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, Header, HTTPException, status
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
+
+from database import Base, DealRow, PickRow, PushRow, connect_database
+from push import FirebaseSender, PushDispatcher
+from schemas import DealInput, PickInput
+
+
+def serialize_deal(row):
+    return {key: getattr(row, key) for key in ("title", "description", "url", "source", "tag", "expires")}
+
+
+def serialize_pick(row):
+    return {key: getattr(row, key) for key in ("title", "body", "url", "date")}
+
+
+def create_app(database_url=None, publish_token=None, sender=None, retry_seconds=60):
+    url = database_url or os.getenv("DATABASE_URL", "sqlite:///./newsapp.db")
+    token = publish_token if publish_token is not None else os.getenv("PUBLISH_TOKEN", "")
+    engine, sessions = connect_database(url)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        if not token.strip():
+            raise RuntimeError("Set PUBLISH_TOKEN before starting the server")
+        if os.getenv("RENDER") and url.startswith("sqlite:"):
+            raise RuntimeError("Render's free disk is ephemeral. Set DATABASE_URL to persistent Postgres.")
+        Base.metadata.create_all(engine)
+        fcm = sender if sender is not None else FirebaseSender()
+        dispatcher = PushDispatcher(sessions, fcm)
+        app.state.dispatcher = dispatcher
+
+        async def retry_outbox():
+            while True:
+                try:
+                    await run_in_threadpool(dispatcher.flush)
+                except Exception as error:
+                    logging.getLogger("newsapp.push").warning("Outbox retry deferred after %s", type(error).__name__)
+                await asyncio.sleep(retry_seconds)
+
+        task = asyncio.create_task(retry_outbox())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            if sender is None:
+                fcm.close()
+            engine.dispose()
+
+    app = FastAPI(title="News App Publisher", version="1.0.0", lifespan=lifespan)
+
+    def require_token(x_publish_token: Annotated[str | None, Header(alias="X-Publish-Token")] = None):
+        if x_publish_token is None or not hmac.compare_digest(x_publish_token.encode(), token.encode()):
+            raise HTTPException(status_code=401, detail="Invalid publish token")
+
+    @app.get("/health")
+    def health():
+        with sessions() as session:
+            session.execute(text("SELECT 1"))
+        return {"status": "ok"}
+
+    @app.get("/api/deals")
+    def get_deals():
+        with sessions() as session:
+            return [serialize_deal(row) for row in session.scalars(select(DealRow).order_by(DealRow.created_at.desc(), DealRow.id.desc()))]
+
+    @app.get("/api/picks")
+    def get_picks():
+        with sessions() as session:
+            return [serialize_pick(row) for row in session.scalars(select(PickRow).order_by(PickRow.date.desc()))]
+
+    def publish(model, fields, topic, serializer):
+        row = model(**fields, created_at=time.time())
+        push = PushRow(topic=topic, title=fields["title"], url=fields["url"], body="Machine's daily pick is ready." if topic == "picks" else "A new free software offer is ready to claim.")
+        with sessions() as session:
+            session.add_all([row, push])
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                detail = "A pick already exists for this date" if topic == "picks" else "A deal already exists for this URL"
+                raise HTTPException(status_code=409, detail=detail)
+            item, push_id = serializer(row), push.id
+        # Persist the content and push in one transaction before contacting FCM.
+        # A transport failure is accepted, visible as `queued`, and retried.
+        app.state.dispatcher.flush()
+        return {"item": item, "push": app.state.dispatcher.status(push_id)}
+
+    @app.post("/api/deals", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_token)])
+    def post_deal(item: DealInput):
+        return publish(DealRow, item.model_dump(mode="json"), "deals", serialize_deal)
+
+    @app.post("/api/picks", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_token)])
+    def post_pick(item: PickInput):
+        return publish(PickRow, item.model_dump(mode="json"), "picks", serialize_pick)
+
+    return app
+
+
+app = create_app()
