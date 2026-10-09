@@ -46,6 +46,12 @@ def require_current_schema(engine):
         raise RuntimeError("Database migration required. Run python migrate.py with this database's DATABASE_URL before starting the updated backend.")
     if not {"offer_details", "claim_steps"} <= {column["name"] for column in inspect(engine).get_columns("deals")}:
         raise RuntimeError("The migration revision is set but deal detail columns are missing; inspect the schema rather than stamping head.")
+    inspector = inspect(engine)
+    constraints = inspector.get_unique_constraints("picks")
+    date_unique = any(c["column_names"] == ["date"] for c in constraints) or any(i.get("unique") and i["column_names"] == ["date"] for i in inspector.get_indexes("picks"))
+    composite_unique = any(set(c["column_names"]) == {"title", "url", "date"} for c in constraints)
+    if date_unique or not composite_unique:
+        raise RuntimeError("Pick uniqueness does not match migration 0003; inspect the schema rather than stamping head.")
 
 
 if __name__ == "__main__":
@@ -61,6 +67,8 @@ if __name__ == "__main__":
         if args.require_postgres and engine.dialect.name != "postgresql":
             raise RuntimeError("Set DATABASE_URL to the intended Neon Postgres connection before migrating")
         upgrade_database(engine)
-        print(f"Migration complete: 0002_deal_details ({engine.dialect.name})")
+        with engine.connect() as connection:
+            revision = MigrationContext.configure(connection).get_current_revision()
+        print(f"Migration complete: {revision} ({engine.dialect.name})")
     finally:
         engine.dispose()

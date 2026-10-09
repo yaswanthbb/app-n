@@ -7,6 +7,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import make_url
 
 from database import DealRow, connect_database
@@ -71,7 +72,7 @@ def test_live_legacy_upgrade_preserves_data_and_is_repeatable(database):
         assert row["offer_details"] is None and row["claim_steps"] is None
         assert connection.execute(text("SELECT id FROM picks")).scalar_one() == 19
         assert connection.execute(text("SELECT attempts FROM push_outbox WHERE id=8")).scalar_one() == 2
-        assert MigrationContext.configure(connection).get_current_revision() == "0002_deal_details"
+        assert MigrationContext.configure(connection).get_current_revision() == "0003_multiple_picks"
 
 
 def test_new_database_migrates_without_create_all(database):
@@ -111,3 +112,45 @@ def test_json_steps_round_trip_on_real_database(database):
         session.refresh(row)
         assert row.claim_steps == ["Open the site", "Claim"]
         assert row.offer_details == "Free usage"
+
+
+def test_0003_preserves_existing_rows_and_replaces_date_uniqueness(database):
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    with migration_connection(database) as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "0002_deal_details")
+        connection.execute(text("INSERT INTO picks (id,title,body,url,date,created_at) VALUES (19,'Original pick','Keep this body','https://example.com/original','2026-10-09',1700000001)"))
+        before = connection.execute(text("SELECT * FROM picks ORDER BY id")).all()
+    upgrade_database(database)
+    upgrade_database(database)
+    with database.connect() as connection:
+        assert connection.execute(text("SELECT * FROM picks ORDER BY id")).all() == before
+    constraints = inspect(database).get_unique_constraints("picks")
+    assert not any(c["column_names"] == ["date"] for c in constraints)
+    assert any(set(c["column_names"]) == {"title", "url", "date"} for c in constraints)
+    with database.begin() as connection:
+        connection.execute(text("INSERT INTO picks (id,title,body,url,date,created_at) VALUES (20,'Second pick','Another body','https://example.com/original','2026-10-09',1700000002)"))
+        connection.execute(text("INSERT INTO picks (id,title,body,url,date,created_at) VALUES (21,'Original pick','A third body','https://example.com/third','2026-10-09',1700000003)"))
+    with pytest.raises(IntegrityError):
+        with database.begin() as connection:
+            connection.execute(text("INSERT INTO picks (id,title,body,url,date,created_at) VALUES (22,'Original pick','Changed body','https://example.com/original','2026-10-09',1700000004)"))
+    with database.connect() as connection:
+        assert connection.execute(text("SELECT id FROM picks ORDER BY date DESC,id DESC")).scalars().all() == [21, 20, 19]
+
+
+def test_0003_downgrade_refuses_to_remove_same_day_picks(database):
+    upgrade_database(database)
+    with database.begin() as connection:
+        connection.execute(text("INSERT INTO picks (id,title,body,url,date,created_at) VALUES (1,'First','Body','https://example.com/one','2026-10-09',1700000001),(2,'Second','Body','https://example.com/two','2026-10-09',1700000002)"))
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    with pytest.raises(RuntimeError, match="no rows were removed"):
+        with migration_connection(database) as connection:
+            config.attributes["connection"] = connection
+            command.downgrade(config, "0002_deal_details")
+    with database.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM picks")).scalar_one() == 2
+        assert MigrationContext.configure(connection).get_current_revision() == "0003_multiple_picks"

@@ -45,7 +45,7 @@ class FeedRepository(
     }
     fun picks(includeFuture: Boolean = false) = dao.observe(key(FeedKind.PICKS)).map { cache ->
         CachedFeed(cache?.let { decode<Pick>(it.payload) }.orEmpty()
-            .filter { includeFuture || it.date <= LocalDate.now().toString() }.sortedByDescending { it.date }, cache?.fetchedAt)
+            .filter { includeFuture || it.date <= LocalDate.now().toString() }.sortedWith(pickOrder), cache?.fetchedAt)
     }
     private inline fun <reified T> decode(payload: String): List<T> =
         runCatching { json.decodeFromString<List<T>>(payload) }.getOrDefault(emptyList())
@@ -74,8 +74,8 @@ class FeedRepository(
                         requireEndpoint(picksUrl, "Picks", "PICKS_FEED_URL")
                         val items = api.picks(picksUrl)
                         require(items.all { it.title.isNotBlank() && it.body.isNotBlank() && isWebUrl(it.url) && validDate(it.date) }) { "The picks feed contains an invalid item. Your saved feed is still available." }
-                        require(items.map { it.date }.distinct().size == items.size) { "The picks feed must have only one pick per date." }
-                        json.encodeToString(items.sortedByDescending { it.date })
+                        require(items.all { it.id == null || it.id > 0 } && items.map { it.itemKey() }.distinct().size == items.size) { "The picks feed contains duplicate or invalid item IDs. Your saved feed is still available." }
+                        json.encodeToString(items.sortedWith(pickOrder))
                     }
                 }
                 dao.put(FeedCache(key, payload, System.currentTimeMillis()))
@@ -127,7 +127,7 @@ class FeedRepository(
         locks.getOrPut(key) { Mutex() }.withLock {
             val resolvedId = id ?: when (kind) {
                 FeedKind.DEALS -> api.deals(dealsUrl).firstOrNull { it.url == identity }?.id
-                FeedKind.PICKS -> api.picks(picksUrl).firstOrNull { it.date == identity }?.id
+                FeedKind.PICKS -> api.picks(picksUrl).firstOrNull { it.legacyIdentity() == identity }?.id
                 else -> null
             }
             require(resolvedId != null && resolvedId > 0) { "This item has no server ID. Update the backend and refresh the feed before deleting it." }
@@ -138,7 +138,7 @@ class FeedRepository(
             dao.get(key)?.let { cache ->
                 val payload = when (kind) {
                     FeedKind.DEALS -> json.encodeToString(decode<Deal>(cache.payload).filterNot { it.id == resolvedId || (it.id == null && it.url == identity) })
-                    FeedKind.PICKS -> json.encodeToString(decode<Pick>(cache.payload).filterNot { it.id == resolvedId || (it.id == null && it.date == identity) })
+                    FeedKind.PICKS -> json.encodeToString(decode<Pick>(cache.payload).filterNot { it.id == resolvedId || (it.id == null && it.legacyIdentity() == identity) })
                     else -> cache.payload
                 }
                 dao.put(cache.copy(payload = payload))

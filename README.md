@@ -124,7 +124,7 @@ Deals are free software offers only. Accepted tags are `AI`, `Dev tools`, `SaaS`
 ]
 ```
 
-Publish one pick each day using your intended calendar date. The backend rejects a second pick for that date (`409`); the app validates unique dates, hides future-dated notes, and renders newest first. Tap a pick card to open its full dated note and link button. The backend does not generate editorial content or automate publication for you.
+Publish any number of distinct picks for your intended calendar date. The backend returns `409` only when **title + URL + date** match an existing pick; changing the body alone still counts as a duplicate. A different title or URL on the same day is accepted. The feed sorts by date descending, then ID descending, so the newest publication appears first within each day. The app uses item IDs for list, detail, and delete identity, keeps each card’s date visible, and hides future-dated notes. Tap a pick card to open its full dated note and link button. The backend does not generate editorial content or automate publication for you.
 
 ### Today / Earlier and local publishing settings
 
@@ -186,13 +186,13 @@ Open `http://localhost:8000/docs` for the API schema. The production Android app
 | --- | --- | --- |
 | GET /health | Public | `{ "status": "ok" }`, verifies DB connectivity |
 | GET /api/deals | Public | Full deals array, latest publication first |
-| GET /api/picks | Public | Full picks array, date descending |
+| GET /api/picks | Public | Full picks array, date descending then ID descending |
 | POST /api/deals | X-Publish-Token | Validate/store one deal and push to `deals` |
-| POST /api/picks | X-Publish-Token | Validate/store one daily pick and push to `picks` |
+| POST /api/picks | X-Publish-Token | Validate/store a pick (multiple per day) and push to `picks` |
 | DELETE /api/deals/{id} | X-Publish-Token | Remove a deal; 204 on success, 404 if absent |
 | DELETE /api/picks/{id} | X-Publish-Token | Remove a pick; 204 on success, 404 if absent |
 
-Successful POST: `201 { "item": { ... }, "push": "sent" | "queued" | "not_configured" }`. Missing/wrong token returns `401`, invalid content returns `422`, and duplicate deal URL or pick date returns `409` without a second push.
+Successful POST: `201 { "item": { ... }, "push": "sent" | "queued" | "not_configured" }`. Missing/wrong token returns `401`, invalid content returns `422`, and duplicate deal URL or exact pick title + URL + date returns `409` without a second push.
 
 Content and a push-outbox row commit in the **same database transaction**. The API tries FCM immediately. Firebase failures leave a queued push; the single-process retry task checks every minute with increasing backoff. Without Firebase credentials, content is still available and pushes remain queued. Adding credentials and restarting dispatches those pending pushes. Malformed credentials fail startup with a configuration error. Delivery is at least once: a crash after FCM accepts a message but before recording success can cause a retry. Android uses a stable notification tag for each published item.
 
@@ -200,14 +200,15 @@ Run **one Uvicorn worker**, as configured on Render, to serialize outbox deliver
 
 ## Migrate the existing Neon database before deploying
 
-Migration execution is **manual**. The updated backend verifies its Alembic revision at startup and fails with a clear migration instruction if the database is still on the old schema. It does not execute DDL on startup or silently create a replacement database. No migration has been applied to your live Neon database by this feature update.
+Migration execution is **manual**. The updated backend verifies its Alembic revision at startup and fails with a clear migration instruction if the database is still on the old schema. It does not execute DDL on startup or silently create a replacement database. Run migration **0003_multiple_picks** before deploying this backend. If you already ran 0002, the command applies only 0003.
 
 The real migrations live in `backend/migrations/versions/`:
 
 - **0001_initial** adopts the existing original `deals`, `picks`, and `push_outbox` tables without dropping/recreating them; it creates these tables for a new database. It checks existing tables for required original columns.
-- **0002_deal_details** adds nullable `deals.offer_details` (**TEXT**) and `deals.claim_steps` (**JSON**). Existing values remain NULL; content, IDs, unique constraints, creation timestamps, and pending pushes are preserved.
+- **0002_deal_details** adds nullable `deals.offer_details` (**TEXT**) and `deals.claim_steps` (**JSON**). Existing values remain NULL; content, IDs, creation timestamps, and pending pushes are preserved.
+- **0003_multiple_picks** removes the unique date constraint from `picks` and adds `UNIQUE (title, url, date)`. Neon uses transactional ALTER TABLE statements without changing existing rows. SQLite uses Alembic batch migration while preserving row values and IDs.
 
-Both migrations and their version record run in one transaction. Postgres migrations use a transaction-scoped advisory lock to serialize concurrent migration commands. They can be run again safely. **Do not use `alembic stamp head` to skip the migration**: it marks a version without adding the columns. An incompatible existing schema fails before being marked current.
+Pending migrations and their version record run in one transaction. Postgres migrations use a transaction-scoped advisory lock to serialize concurrent migration commands. They can be run again safely. **Do not use `alembic stamp head` to skip the migration**: it marks a version without adding the columns. An incompatible existing schema fails before being marked current.
 
 Run these commands from the updated checkout on your computer, using the intended Neon connection (a direct/non-pooled connection is preferable for schema maintenance; see [Neon connection guidance](https://neon.com/docs/connect/connection-pooling)). Keep the connection value in the environment or private `backend/.env`, never in Git or chat:
 
@@ -222,7 +223,7 @@ export DATABASE_URL='postgresql://USER:PASSWORD@NEON_HOST/DB_NAME?sslmode=requir
 python migrate.py --require-postgres
 ```
 
-`--require-postgres` refuses to accidentally migrate a local SQLite fallback. `migrate.py` loads a local `.env` only for variables not already set in the environment. Success prints `Migration complete: 0002_deal_details (postgresql)` without printing the URL or credentials.
+`--require-postgres` refuses to accidentally migrate a local SQLite fallback. `migrate.py` loads a local `.env` only for variables not already set in the environment. Success prints `Migration complete: 0003_multiple_picks (postgresql)` without printing the URL or credentials.
 
 Verify the added columns and revision in Neon's SQL editor if desired:
 
@@ -232,9 +233,13 @@ FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'deals'
   AND column_name IN ('offer_details', 'claim_steps');
 SELECT version_num FROM alembic_version;
+-- Expected revision: 0003_multiple_picks
+SELECT conname, pg_get_constraintdef(oid)
+FROM pg_constraint WHERE conrelid = 'public.picks'::regclass AND contype = 'u';
+-- Expected: UNIQUE (title, url, date), with no UNIQUE (date).
 ```
 
-The old backend can continue using the expanded schema: both new columns are nullable and its existing columns are unchanged. Run the migration **before deploying the updated backend**. Keep your normal database backup/recovery point; rolling back the migration would remove the new detail fields, so a code rollback can normally leave the additive schema in place.
+Run the migration **before deploying the updated backend**. The old Android APK rejects feeds with multiple same-day picks, so install the updated APK before publishing additional notes on one date. Migration 0003 changes constraints only on Neon, preserving existing rows, IDs, dates, bodies, and creation timestamps. Its downgrade refuses to restore date uniqueness while multiple rows share a day; it never deletes notes to make a downgrade fit.
 
 ## Deploy the backend to Render's free tier
 
@@ -242,7 +247,7 @@ The existing **render.yaml** keeps a free Python web service and accepts an exte
 
 1. Run the Neon migration above yourself.
 2. Publish the updated repository to your Git host yourself, then deploy the updated backend to your existing Render service.
-3. Render installs `backend/requirements.txt` and runs `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`. Startup checks that the database has revision `0002_deal_details`.
+3. Render installs `backend/requirements.txt` and runs `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`. Startup checks that the database has revision `0003_multiple_picks`.
 4. Visit `https://YOUR-SERVICE.onrender.com/health` and confirm `{"status":"ok"}`.
 5. Check `/api/deals` and `/api/picks`: responses now include `id` and ISO-8601 UTC `created_at`; deals also include nullable `offer_details` and `claim_steps`.
 6. Rebuild/install the Android APK using the same signing key. Enter **PUBLISH_TOKEN** in the app's Settings only if you want publisher deletion access.
@@ -279,7 +284,7 @@ curl --fail-with-body -X POST "$API_BASE/api/deals" \
   }'
 ```
 
-Publish today's single pick (uses your shell's local calendar date):
+Publish a pick (repeat with distinct titles or URLs for more notes on the same date; uses your shell's local calendar date):
 
 ```bash
 PICK_DATE="$(date +%F)"
@@ -296,6 +301,21 @@ curl --fail-with-body -X POST "$API_BASE/api/picks" \
 JSON
 ```
 
+Check three distinct notes for one date (replace example content and URLs before publishing):
+
+```bash
+PICK_DATE="$(date +%F)"
+for NUMBER in 1 2 3; do
+  curl --fail-with-body -w '\nHTTP %{http_code}\n' -X POST "$API_BASE/api/picks" \
+    -H "X-Publish-Token: $PUBLISH_TOKEN" \
+    -H 'Content-Type: application/json' \
+    --data-binary "{\"title\":\"Same-day note $NUMBER\",\"body\":\"Curated note $NUMBER\",\"url\":\"https://example.com/note-$NUMBER\",\"date\":\"$PICK_DATE\"}"
+done
+# Expected: 201 for each distinct note. Repeating this loop returns 409.
+curl --fail-with-body "$API_BASE/api/picks"
+# Within PICK_DATE, IDs appear in descending order: note 3, note 2, note 1.
+```
+
 Inspect the public feeds:
 
 ```bash
@@ -304,7 +324,7 @@ curl --fail-with-body "$API_BASE/api/picks"
 curl --fail-with-body "$API_BASE/health"
 ```
 
-Replace example content/URLs before publishing. Repeating the same deal URL or pick date intentionally returns `409`.
+Replace example content/URLs before publishing. Repeating the same deal URL or the same pick title + URL + date intentionally returns `409`. Distinct picks on the same date return `201`.
 
 Delete an item using the `id` returned by GET or POST:
 
@@ -328,7 +348,7 @@ Android:
 ./gradlew assembleRelease testDebugUnitTest lintRelease
 ```
 
-Compose rendering tests exercise old/new deal details, full pick notes, card-to-detail navigation, and confirmation-before-deletion. Focused JVM tests cover local-midnight/DST grouping, nullable fields, successful and failed delete/cache behavior, and cache preservation after failure/restart, separate filter caches and freshness, invalid feed rejection, unique pick dates, legitimate empty feeds, URL validation, expiry boundaries, time-ago formatting, and the next-local-9:00 schedule across daylight saving changes.
+Compose rendering tests exercise old/new deal details, full pick notes, card-to-detail navigation, and confirmation-before-deletion. Focused JVM tests cover local-midnight/DST grouping, nullable fields, successful and failed delete/cache behavior, and cache preservation after failure/restart, separate filter caches and freshness, invalid feed rejection, multiple same-day picks, unique item identities, legitimate empty feeds, URL validation, expiry boundaries, time-ago formatting, and the next-local-9:00 schedule across daylight saving changes.
 
 Backend:
 
@@ -338,7 +358,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-API tests use temporary SQLite databases and a fake FCM sender. Migration tests run against SQLite and, when `TEST_POSTGRES_URL` is supplied, isolated schemas in a local test Postgres database. They verify original-row/ID preservation, NULL defaults, repeatable migrations, fresh database setup, and transaction rollback on incompatible schemas. The Postgres test fixture creates and drops only its own temporary schema; never point test configuration at your live Neon database. Tests also cover new deal-field round trips, authenticated DELETE/204/404 behavior, and cancellation of unsent pushes. They cover authentication, exact feed shapes, categories/free claims, invalid dates/URLs, duplicate protection, persistence across restarts, push failures/retries, and operation without Firebase. Live GNews/FCM testing needs your own key and project credentials.
+API tests use temporary SQLite databases and a fake FCM sender. Migration tests run against SQLite and, when `TEST_POSTGRES_URL` is supplied, isolated schemas in a local test Postgres database. They verify original-row/ID preservation, NULL defaults, repeatable migrations, removal of date uniqueness in 0003, exact-duplicate constraints, safe downgrade refusal, fresh database setup, and transaction rollback on incompatible schemas. The Postgres test fixture creates and drops only its own temporary schema; never point test configuration at your live Neon database. Tests also cover new deal-field round trips, authenticated DELETE/204/404 behavior, and cancellation of unsent pushes. They cover authentication, exact feed shapes, categories/free claims, invalid dates/URLs, duplicate protection, persistence across restarts, push failures/retries, and operation without Firebase. Live GNews/FCM testing needs your own key and project credentials.
 
 Manual phone smoke test: install the release APK, visit each tab and news filter, refresh populated feeds, open an article/Claim/pick, turn networking off and relaunch to verify cached content, publish a new deal/pick while the app is foregrounded and backgrounded, and verify each notification tap. Enable/deny notification permission to check both paths. Test the morning digest on a device, allowing for Android's scheduling delays.
 
@@ -360,4 +380,4 @@ backend/migrations/              Versioned Alembic schema migrations
 render.yaml                      Free Render service using external Neon Postgres
 ```
 
-Existing feed URLs, local news/Firebase configuration, and signing keys are preserved. Supply credentials locally as needed; the publishing token is entered through Settings and never committed. You run the Neon migration and backend deployment yourself.
+Existing feed URLs, local news/Firebase configuration, and signing keys are preserved. Supply credentials locally as needed; the publishing token is entered through Settings and never committed. Apply the Neon migration before backend deployment; repository publishing and deployment remain under your control.

@@ -1,4 +1,4 @@
-from sqlalchemy import Float, Integer, JSON, String, Text, create_engine, event
+from sqlalchemy import Float, Integer, JSON, String, Text, UniqueConstraint, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -22,11 +22,12 @@ class DealRow(Base):
 
 class PickRow(Base):
     __tablename__ = "picks"
+    __table_args__ = (UniqueConstraint("title", "url", "date", name="uq_picks_title_url_date"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(Text)
     url: Mapped[str] = mapped_column(Text)
-    date: Mapped[str] = mapped_column(String(10), unique=True)
+    date: Mapped[str] = mapped_column(String(10))
     created_at: Mapped[float] = mapped_column(Float)
 
 

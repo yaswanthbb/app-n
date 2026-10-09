@@ -86,7 +86,7 @@ class FeedRepositoryTest {
         val repo = FeedRepository(dao, api, Json, "key", "https://example.com/api/deals", "https://example.com/api/picks", deletes)
         api.pickItems = api.pickItems.map { it.copy(id = 19) }
         repo.refresh(FeedKind.PICKS)
-        repo.delete(FeedKind.PICKS, 19, api.pickItems.single().date, "test-token")
+        repo.delete(FeedKind.PICKS, 19, api.pickItems.single().legacyIdentity(), "test-token")
         assertTrue(repo.picks().first().items.isEmpty())
     }
 
@@ -113,11 +113,35 @@ class FeedRepositoryTest {
         assertFalse(repository.refresh(FeedKind.DEALS))
         assertEquals("AI", repository.deals().first().items.single().tag)
     }
-    @Test fun `duplicate dates cannot overwrite saved picks`() = runTest {
+    @Test fun `three distinct same day picks cache newest ID first and survive offline`() = runTest {
+        val first = api.pickItems.single().copy(id = 19)
+        api.pickItems = listOf(first, first.copy(id = 21, title = "Third pick"), first.copy(id = 20, title = "Second pick"))
+        assertTrue(repository.refresh(FeedKind.PICKS))
+        assertEquals(listOf(21L, 20L, 19L), repository.picks().first().items.map { it.id })
+        api.offline = true
+        assertFalse(repository.refresh(FeedKind.PICKS))
+        val restarted = FeedRepository(dao, api, Json, "test-key")
+        assertEquals(listOf(21L, 20L, 19L), restarted.picks().first().items.map { it.id })
+    }
+    @Test fun `duplicate item IDs cannot overwrite saved picks`() = runTest {
+        api.pickItems = api.pickItems.map { it.copy(id = 19) }
         assertTrue(repository.refresh(FeedKind.PICKS))
         api.pickItems = api.pickItems + api.pickItems.single().copy(title = "Second pick")
         assertFalse(repository.refresh(FeedKind.PICKS))
         assertEquals(1, repository.picks().first().items.size)
+    }
+    @Test fun `legacy cached deletion resolves exact pick without deleting same day neighbors`() = runTest {
+        val deletes = FakeDeleteApi()
+        val repo = FeedRepository(dao, api, Json, "key", "https://example.com/api/deals", "https://example.com/api/picks", deletes)
+        val first = api.pickItems.single()
+        val second = first.copy(title = "Second resource")
+        api.pickItems = listOf(first, second)
+        assertTrue(repo.refresh(FeedKind.PICKS))
+        assertNotEquals(first.itemKey(), second.itemKey())
+        api.pickItems = listOf(first.copy(id = 19), second.copy(id = 20))
+        repo.delete(FeedKind.PICKS, null, second.legacyIdentity(), "test-token")
+        assertEquals(listOf(first), repo.picks().first().items)
+        assertEquals(listOf("https://example.com/api/picks/20" to "test-token"), deletes.requests)
     }
     @Test fun `valid empty feed replaces old content`() = runTest {
         repository.refresh(FeedKind.DEALS)

@@ -82,14 +82,24 @@ def test_publish_shapes_and_topics(setup):
     assert sender.sent == [("deals", DEAL["title"]), ("picks", PICK["title"])]
 
 
-def test_one_pick_per_day_and_newest_first(setup):
+def test_multiple_picks_per_day_exact_duplicate_and_newest_first(setup):
     client, sender, _ = setup
     yesterday = {**PICK, "date": "2026-10-08", "title": "Yesterday's resource"}
     assert client.post("/api/picks", json=yesterday, headers=AUTH).status_code == 201
-    assert client.post("/api/picks", json=PICK, headers=AUTH).status_code == 201
-    assert client.post("/api/picks", json={**PICK, "title": "A second pick"}, headers=AUTH).status_code == 409
-    assert [feed_content(item) for item in client.get("/api/picks").json()] == [PICK, yesterday]
-    assert len(sender.sent) == 2
+    same_day = [PICK, {**PICK, "title": "A second pick"}, {**PICK, "url": "https://example.com/another"}]
+    published = []
+    for item in same_day:
+        response = client.post("/api/picks", json=item, headers=AUTH)
+        assert response.status_code == 201
+        published.append(response.json()["item"])
+    for item in [PICK, {**PICK, "body": "A changed body still has the same duplicate identity"}]:
+        response = client.post("/api/picks", json=item, headers=AUTH)
+        assert response.status_code == 409
+        assert "title, URL, and date" in response.json()["detail"]
+    feed = client.get("/api/picks").json()
+    assert feed[:3] == list(reversed(published))
+    assert feed_content(feed[-1]) == yesterday
+    assert len(sender.sent) == 4
 
 
 def test_duplicate_deal_does_not_push_again(setup):

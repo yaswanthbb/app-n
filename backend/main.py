@@ -67,7 +67,7 @@ def create_app(database_url=None, publish_token=None, sender=None, retry_seconds
                 fcm.close()
             engine.dispose()
 
-    app = FastAPI(title="News App Publisher", version="1.1.0", lifespan=lifespan)
+    app = FastAPI(title="News App Publisher", version="1.2.0", lifespan=lifespan)
 
     def require_token(x_publish_token: Annotated[str | None, Header(alias="X-Publish-Token")] = None):
         if x_publish_token is None or not hmac.compare_digest(x_publish_token.encode(), token.encode()):
@@ -87,7 +87,7 @@ def create_app(database_url=None, publish_token=None, sender=None, retry_seconds
     @app.get("/api/picks")
     def get_picks():
         with sessions() as session:
-            return [serialize_pick(row) for row in session.scalars(select(PickRow).order_by(PickRow.date.desc()))]
+            return [serialize_pick(row) for row in session.scalars(select(PickRow).order_by(PickRow.date.desc(), PickRow.id.desc()))]
 
     def publish(model, fields, topic, serializer):
         row = model(**fields, created_at=time.time())
@@ -98,7 +98,12 @@ def create_app(database_url=None, publish_token=None, sender=None, retry_seconds
                 session.commit()
             except IntegrityError:
                 session.rollback()
-                detail = "A pick already exists for this date" if topic == "picks" else "A deal already exists for this URL"
+                duplicate = select(model.id).where(model.url == fields["url"])
+                if topic == "picks":
+                    duplicate = duplicate.where(model.title == fields["title"], model.date == fields["date"])
+                if session.scalar(duplicate.limit(1)) is None:
+                    raise  # Unrelated integrity failures are not duplicate publications.
+                detail = "This title, URL, and date have already been published" if topic == "picks" else "A deal already exists for this URL"
                 raise HTTPException(status_code=409, detail=detail)
             item, push_id = serializer(row), push.id
         # Persist the content and push in one transaction before contacting FCM.

@@ -184,8 +184,8 @@ fun NewsRoot(vm: FeedViewModel, target: String?, onTargetConsumed: () -> Unit, n
                 composable("picks") {
                     FeedPage("Machine's picks", "ONE THING WORTH YOUR TIME", picks.fetchedAt, statuses["picks"] ?: RefreshStatus(),
                         { vm.refresh(FeedKind.PICKS) }, visiblePicks.isEmpty(), "Today's pick is on its way", "One launch, tool, idea, or resource. Hand-picked every day.") {
-                        groupedCards(pickGroups, { it.date }, "Today's pick is on its way. Explore an earlier pick below.") { pick ->
-                            PickCard(pick, { nav.navigate("picks/item/${pick.date}") }, { vm.requestDelete(DeleteTarget(FeedKind.PICKS, pick.id, pick.date, pick.title)) })
+                        groupedCards(pickGroups, { it.itemKey() }, "Today's pick is on its way. Explore an earlier pick below.") { pick ->
+                            PickCard(pick, { nav.navigate("picks/item/${Uri.encode(pick.itemKey())}") }, { vm.requestDelete(DeleteTarget(FeedKind.PICKS, pick.id, pick.legacyIdentity(), pick.title)) })
                         }
                     }
                 }
@@ -193,9 +193,9 @@ fun NewsRoot(vm: FeedViewModel, target: String?, onTargetConsumed: () -> Unit, n
                     val deal = deals.items.firstOrNull { it.url == entry.arguments?.getString("url") }
                     DealDetailScreen(deal, { nav.popBackStack() }) { deal?.let { vm.requestDelete(DeleteTarget(FeedKind.DEALS, it.id, it.url, it.title)) } }
                 }
-                composable("picks/item/{date}") { entry ->
-                    val pick = picks.items.firstOrNull { it.date == entry.arguments?.getString("date") }
-                    PickDetailScreen(pick, { nav.popBackStack() }) { pick?.let { vm.requestDelete(DeleteTarget(FeedKind.PICKS, it.id, it.date, it.title)) } }
+                composable("picks/item/{key}") { entry ->
+                    val pick = picks.items.firstOrNull { it.itemKey() == entry.arguments?.getString("key") }
+                    PickDetailScreen(pick, { nav.popBackStack() }) { pick?.let { vm.requestDelete(DeleteTarget(FeedKind.PICKS, it.id, it.legacyIdentity(), it.title)) } }
                 }
                 composable("settings") { SettingsScreen(tokenSettings, vm::saveToken, vm::clearToken) { nav.popBackStack() } }
             }

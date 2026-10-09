@@ -24,8 +24,8 @@ android {
         applicationId = "com.machine.newsapp"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
         buildConfigField("String", "NEWS_API_KEY", quoted(local.getProperty("NEWS_API_KEY", "")))
         buildConfigField("boolean", "FCM_CONFIGURED", hasFirebase.toString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

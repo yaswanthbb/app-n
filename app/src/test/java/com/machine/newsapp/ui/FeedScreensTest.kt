@@ -83,4 +83,39 @@ class FeedScreensTest {
         assertEquals(1, store.reads)
         assertEquals("test-token", deletes.requests.single().second)
     }
+
+    @Test fun `same day picks have distinct cards details and delete targets`() {
+        val api = FakeApi().apply {
+            pickItems = listOf(
+                Pick("First note", "First full body", "https://example.com/one", "2020-01-01", id = 19),
+                Pick("Third note", "Third full body", "https://example.com/three", "2020-01-01", id = 21),
+                Pick("Second note", "Second full body", "https://example.com/two", "2020-01-01", id = 20),
+            )
+        }
+        val deletes = FakeDeleteApi()
+        val repository = FeedRepository(MemoryDao(), api, Json, "key", "https://example.com/api/deals", "https://example.com/api/picks", deletes)
+        val vm = FeedViewModel(repository, MemoryTokenStore())
+        compose.setContent { NewsTheme { NewsRoot(vm, null, {}, true, {}) } }
+        compose.onNodeWithText("MACHINE'S PICKS").performClick()
+        compose.onNodeWithText("Earlier · 3").assertExists()
+        assertEquals(listOf(21L, 20L, 19L), vm.picks.value.items.map { it.id })
+        compose.onNodeWithText("Third note").assertIsDisplayed()
+        compose.onAllNodes(hasScrollAction()).onFirst().performScrollToNode(hasText("First note"))
+        compose.onNodeWithText("First note").assertIsDisplayed()
+        compose.onAllNodes(hasScrollAction()).onFirst().performScrollToNode(hasText("Second note"))
+        compose.onNodeWithText("Second note").performClick()
+        compose.onNodeWithText("Second full body").assertIsDisplayed()
+        compose.onNodeWithText("Wednesday, January 1, 2020").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Item options").performClick()
+        compose.onNodeWithText("Delete").performClick()
+        compose.onNodeWithText("Delete").performClick()
+        compose.waitUntil(5_000) { deletes.requests.size == 1 }
+        compose.onAllNodes(hasScrollAction()).onFirst().performScrollToIndex(0)
+        compose.onNodeWithText("Earlier · 2").assertExists()
+        compose.onNodeWithText("Second note").assertDoesNotExist()
+        compose.onNodeWithText("Third note").assertExists()
+        compose.onAllNodes(hasScrollAction()).onFirst().performScrollToNode(hasText("First note"))
+        compose.onNodeWithText("First note").assertIsDisplayed()
+        assertEquals("https://example.com/api/picks/20", deletes.requests.single().first)
+    }
 }

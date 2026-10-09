@@ -43,6 +43,12 @@ data class Pick(
     @SerialName("created_at") val createdAt: String? = null,
 )
 
+// Old feeds/caches can omit IDs. Length prefixes keep their fallback identity
+// unambiguous even when titles or URLs contain separators.
+fun Pick.legacyIdentity(): String = listOf(date, title, url).joinToString("|") { "${it.length}:$it" }
+fun Pick.itemKey(): String = id?.let { "id:$it" } ?: "legacy:${legacyIdentity()}"
+val pickOrder = compareByDescending<Pick> { it.date }.thenByDescending { it.id }
+
 val softwareTags = setOf("AI", "Dev tools", "SaaS", "Software", "Cloud", "Data", "Security", "Design", "Learning")
 private val phoneOffer = Regex("\\b(telco|telecom|cellular|prepaid|postpaid|recharge|smartphone|iphone|handset)\\b|\\b(sim card|phone plan|mobile plan|data plan)\\b", RegexOption.IGNORE_CASE)
 
