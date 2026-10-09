@@ -5,6 +5,8 @@ import androidx.room.Room
 import com.machine.newsapp.data.FeedApi
 import com.machine.newsapp.data.FeedDatabase
 import com.machine.newsapp.data.FeedRepository
+import com.machine.newsapp.data.DeleteApi
+import com.machine.newsapp.data.EncryptedPublishTokenStore
 import com.machine.newsapp.notifications.DailyScheduler
 import com.machine.newsapp.notifications.Notifications
 import com.machine.newsapp.notifications.TopicSubscriptionWorker
@@ -38,5 +40,12 @@ class AppContainer(application: Application) {
         .client(client)
         .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
         .build().create(FeedApi::class.java)
-    val repository = FeedRepository(database.feeds(), api, json)
+    // Custom publish-token headers must never be forwarded by an HTTP redirect.
+    private val deleteApi = Retrofit.Builder()
+        .baseUrl(FeedConfig.NEWS_BASE_URL)
+        .client(client.newBuilder().followRedirects(false).followSslRedirects(false).build())
+        .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+        .build().create(DeleteApi::class.java)
+    val repository = FeedRepository(database.feeds(), api, json, deleteApi = deleteApi)
+    val tokenStore = EncryptedPublishTokenStore(application)
 }

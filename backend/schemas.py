@@ -31,10 +31,21 @@ class DealInput(FeedItem):
     source: str = Field(min_length=1, max_length=120)
     tag: Tag
     expires: date | None = None
+    offer_details: str | None = Field(default=None, max_length=10000)
+    claim_steps: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("claim_steps", mode="before")
+    @classmethod
+    def validate_steps(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(not isinstance(step, str) or not step.strip() or len(step) > 2000 for step in value):
+            raise ValueError("claim_steps must be an array of nonempty strings or null")
+        return [step.strip() for step in value]
 
     @model_validator(mode="after")
     def software_and_free(self):
-        text = f"{self.title} {self.description}"
+        text = f"{self.title} {self.description} {self.offer_details or ''} {' '.join(self.claim_steps or [])}"
         if PHONE_OFFER.search(text):
             raise ValueError("Phone and telco offers are not allowed")
         if not FREE_OFFER.search(text):

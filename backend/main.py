@@ -1,27 +1,33 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
 import hmac
 import logging
 import os
 import time
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
-from sqlalchemy import select, text
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
-from database import Base, DealRow, PickRow, PushRow, connect_database
+from database import DealRow, PickRow, PushRow, connect_database
+from migrate import require_current_schema
 from push import FirebaseSender, PushDispatcher
 from schemas import DealInput, PickInput
 
 
 def serialize_deal(row):
-    return {key: getattr(row, key) for key in ("title", "description", "url", "source", "tag", "expires")}
+    return {**{key: getattr(row, key) for key in ("id", "title", "description", "url", "source", "tag", "expires", "offer_details", "claim_steps")}, "created_at": publish_timestamp(row.created_at)}
 
 
 def serialize_pick(row):
-    return {key: getattr(row, key) for key in ("title", "body", "url", "date")}
+    return {**{key: getattr(row, key) for key in ("id", "title", "body", "url", "date")}, "created_at": publish_timestamp(row.created_at)}
+
+
+def publish_timestamp(seconds):
+    return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def create_app(database_url=None, publish_token=None, sender=None, retry_seconds=60):
@@ -35,7 +41,9 @@ def create_app(database_url=None, publish_token=None, sender=None, retry_seconds
             raise RuntimeError("Set PUBLISH_TOKEN before starting the server")
         if os.getenv("RENDER") and url.startswith("sqlite:"):
             raise RuntimeError("Render's free disk is ephemeral. Set DATABASE_URL to persistent Postgres.")
-        Base.metadata.create_all(engine)
+        # The publisher runs migrations explicitly before deploying this version.
+        # Startup verifies the schema but never mutates the live database schema.
+        await run_in_threadpool(require_current_schema, engine)
         fcm = sender if sender is not None else FirebaseSender()
         dispatcher = PushDispatcher(sessions, fcm)
         app.state.dispatcher = dispatcher
@@ -59,7 +67,7 @@ def create_app(database_url=None, publish_token=None, sender=None, retry_seconds
                 fcm.close()
             engine.dispose()
 
-    app = FastAPI(title="News App Publisher", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="News App Publisher", version="1.1.0", lifespan=lifespan)
 
     def require_token(x_publish_token: Annotated[str | None, Header(alias="X-Publish-Token")] = None):
         if x_publish_token is None or not hmac.compare_digest(x_publish_token.encode(), token.encode()):
@@ -105,6 +113,29 @@ def create_app(database_url=None, publish_token=None, sender=None, retry_seconds
     @app.post("/api/picks", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_token)])
     def post_pick(item: PickInput):
         return publish(PickRow, item.model_dump(mode="json"), "picks", serialize_pick)
+
+    def remove(model, item_id, topic):
+        # Match the dispatcher's lock so an unsent outbox item cannot race deletion.
+        with app.state.dispatcher.lock, sessions() as session:
+            row = session.get(model, item_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Item not found")
+            # Old outbox rows identify content by its unique (topic, URL, title).
+            # Remove only pending pushes; delivered notifications can't be recalled.
+            matching_items = session.scalar(select(func.count()).select_from(model).where(model.url == row.url, model.title == row.title))
+            if matching_items == 1:
+                session.execute(delete(PushRow).where(PushRow.topic == topic, PushRow.url == row.url, PushRow.title == row.title, PushRow.sent_at.is_(None)))
+            session.delete(row)
+            session.commit()
+        return Response(status_code=204)
+
+    @app.delete("/api/deals/{id}", status_code=204, dependencies=[Depends(require_token)])
+    def delete_deal(id: int):
+        return remove(DealRow, id, "deals")
+
+    @app.delete("/api/picks/{id}", status_code=204, dependencies=[Depends(require_token)])
+    def delete_pick(id: int):
+        return remove(PickRow, id, "picks")
 
     return app
 

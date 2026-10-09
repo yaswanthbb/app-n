@@ -1,4 +1,4 @@
-from sqlalchemy import Float, Integer, String, Text, create_engine, event
+from sqlalchemy import Float, Integer, JSON, String, Text, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -15,6 +15,8 @@ class DealRow(Base):
     source: Mapped[str] = mapped_column(String(120))
     tag: Mapped[str] = mapped_column(String(30))
     expires: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    offer_details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_steps: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[float] = mapped_column(Float)
 
 

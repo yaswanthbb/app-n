@@ -1,6 +1,7 @@
 package com.machine.newsapp.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 import java.net.URI
 import java.time.Duration
 import java.time.Instant
@@ -30,9 +31,17 @@ data class Deal(
     val source: String,
     val tag: String,
     val expires: String? = null,
+    val id: Long? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("offer_details") val offerDetails: String? = null,
+    @SerialName("claim_steps") val claimSteps: List<String>? = null,
 )
 @Serializable
-data class Pick(val title: String, val body: String, val url: String, val date: String)
+data class Pick(
+    val title: String, val body: String, val url: String, val date: String,
+    val id: Long? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+)
 
 val softwareTags = setOf("AI", "Dev tools", "SaaS", "Software", "Cloud", "Data", "Security", "Design", "Learning")
 private val phoneOffer = Regex("\\b(telco|telecom|cellular|prepaid|postpaid|recharge|smartphone|iphone|handset)\\b|\\b(sim card|phone plan|mobile plan|data plan)\\b", RegexOption.IGNORE_CASE)
@@ -43,7 +52,7 @@ fun isWebUrl(value: String, httpsOnly: Boolean = false): Boolean = runCatching {
         !uri.host.isNullOrBlank() && uri.userInfo == null
 }.getOrDefault(false)
 
-fun Deal.isSoftwareOffer(): Boolean = tag in softwareTags && !phoneOffer.containsMatchIn("$title $description")
+fun Deal.isSoftwareOffer(): Boolean = tag in softwareTags && !phoneOffer.containsMatchIn("$title $description ${offerDetails.orEmpty()} ${claimSteps.orEmpty().joinToString(" ")}")
 fun Deal.isActive(today: LocalDate = LocalDate.now()): Boolean =
     expires == null || runCatching { !LocalDate.parse(expires).isBefore(today) }.getOrDefault(false)
 

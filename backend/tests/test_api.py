@@ -6,6 +6,9 @@ from sqlalchemy import select
 
 from database import PushRow
 from main import create_app
+from database import connect_database
+from migrate import upgrade_database
+from datetime import datetime, timezone
 
 TOKEN = "test-publish-token"
 AUTH = {"X-Publish-Token": TOKEN}
@@ -26,10 +29,22 @@ class FakeSender:
         self.sent.append((row.topic, row.title))
 
 
+def prepare_database(url):
+    engine, _ = connect_database(url)
+    upgrade_database(engine)
+    engine.dispose()
+
+
+def feed_content(item):
+    return {key: value for key, value in item.items() if key not in {"id", "created_at", "offer_details", "claim_steps"}}
+
+
 @pytest.fixture
 def setup(tmp_path):
     sender = FakeSender()
-    app = create_app(f"sqlite:///{tmp_path / 'feeds.db'}", TOKEN, sender, retry_seconds=3600)
+    url = f"sqlite:///{tmp_path / 'feeds.db'}"
+    prepare_database(url)
+    app = create_app(url, TOKEN, sender, retry_seconds=3600)
     with TestClient(app) as client:
         yield client, sender, app
 
@@ -55,8 +70,15 @@ def test_publish_shapes_and_topics(setup):
     for topic, item in [("deals", DEAL), ("picks", PICK)]:
         response = client.post(f"/api/{topic}", json=item, headers=AUTH)
         assert response.status_code == 201
-        assert response.json() == {"item": item, "push": "sent"}
-        assert client.get(f"/api/{topic}").json() == [item]
+        published = response.json()["item"]
+        assert feed_content(published) == item
+        assert response.json()["push"] == "sent"
+        assert published["id"] == 1
+        assert datetime.fromisoformat(published["created_at"]).tzinfo == timezone.utc
+        if topic == "deals":
+            assert published["offer_details"] is None
+            assert published["claim_steps"] is None
+        assert client.get(f"/api/{topic}").json() == [published]
     assert sender.sent == [("deals", DEAL["title"]), ("picks", PICK["title"])]
 
 
@@ -66,7 +88,7 @@ def test_one_pick_per_day_and_newest_first(setup):
     assert client.post("/api/picks", json=yesterday, headers=AUTH).status_code == 201
     assert client.post("/api/picks", json=PICK, headers=AUTH).status_code == 201
     assert client.post("/api/picks", json={**PICK, "title": "A second pick"}, headers=AUTH).status_code == 409
-    assert client.get("/api/picks").json() == [PICK, yesterday]
+    assert [feed_content(item) for item in client.get("/api/picks").json()] == [PICK, yesterday]
     assert len(sender.sent) == 2
 
 
@@ -100,7 +122,7 @@ def test_push_failure_keeps_content_and_retries(setup):
     response = client.post("/api/deals", json=DEAL, headers=AUTH)
     assert response.status_code == 201
     assert response.json()["push"] == "queued"
-    assert client.get("/api/deals").json() == [DEAL]
+    assert [feed_content(item) for item in client.get("/api/deals").json()] == [DEAL]
     dispatcher = app.state.dispatcher
     with dispatcher.sessions() as session:
         row = session.scalar(select(PushRow))
@@ -117,7 +139,7 @@ def test_no_firebase_is_accepted_and_persisted(setup):
     client, sender, app = setup
     sender.configured = False
     assert client.post("/api/picks", json=PICK, headers=AUTH).json()["push"] == "not_configured"
-    assert client.get("/api/picks").json() == [PICK]
+    assert [feed_content(item) for item in client.get("/api/picks").json()] == [PICK]
     sender.configured = True
     app.state.dispatcher.flush()
     assert sender.sent == [("picks", PICK["title"])]
@@ -125,10 +147,11 @@ def test_no_firebase_is_accepted_and_persisted(setup):
 
 def test_content_survives_process_restart(tmp_path):
     url = f"sqlite:///{tmp_path / 'persistent.db'}"
+    prepare_database(url)
     with TestClient(create_app(url, TOKEN, FakeSender())) as client:
         assert client.post("/api/deals", json=DEAL, headers=AUTH).status_code == 201
     with TestClient(create_app(url, TOKEN, FakeSender())) as client:
-        assert client.get("/api/deals").json() == [DEAL]
+        assert [feed_content(item) for item in client.get("/api/deals").json()] == [DEAL]
 
 
 def test_missing_token_fails_closed(tmp_path):

@@ -37,12 +37,12 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         handleIntent(intent)
-        val repository = (application as NewsApplication).container.repository
+        val container = (application as NewsApplication).container
         setContent {
             NewsTheme {
                 val vm: FeedViewModel = viewModel(factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
-                    override fun <T : ViewModel> create(modelClass: Class<T>): T = FeedViewModel(repository) as T
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T = FeedViewModel(container.repository, container.tokenStore) as T
                 })
                 NewsRoot(vm, targetTab, { targetTab = null }, notificationsEnabled, ::enableNotifications)
             }

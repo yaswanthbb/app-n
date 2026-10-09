@@ -1,5 +1,7 @@
 package com.machine.newsapp.ui
 
+import android.net.Uri
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -15,6 +17,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.LocalOffer
 import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -37,9 +40,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import coil.compose.AsyncImage
 import com.machine.newsapp.data.*
-import kotlinx.coroutines.delay
 import java.time.Instant
-import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -60,9 +61,20 @@ fun NewsRoot(vm: FeedViewModel, target: String?, onTargetConsumed: () -> Unit, n
     val deals by vm.deals.collectAsStateWithLifecycle()
     val picks by vm.picks.collectAsStateWithLifecycle()
     val statuses by vm.statuses.collectAsStateWithLifecycle()
+    val pendingDelete by vm.pendingDelete.collectAsStateWithLifecycle()
+    val deleting by vm.deleting.collectAsStateWithLifecycle()
+    val deleteError by vm.deleteError.collectAsStateWithLifecycle()
+    val tokenSettings by vm.tokenSettings.collectAsStateWithLifecycle()
+    val clock by rememberLocalFeedClock()
+    val now = clock.instant
+    val visibleDeals = deals.items.filter { it.isActive(clock.today) }
+    val visiblePicks = picks.items.filter { it.date <= clock.today.toString() }
+    val newsGroups = groupByLocalDay(news.items, clock.today, clock.zone) { it.publishedAt }
+    val dealGroups = groupByLocalDay(visibleDeals, clock.today, clock.zone) { it.createdAt }
+    val pickGroups = groupByLocalDay(visiblePicks, clock.today, clock.zone) { it.createdAt }
+    val isTab = tabs.any { it.kind.route == route }
+    val snackbar = remember { SnackbarHostState() }
     var hidePermission by rememberSaveable { mutableStateOf(false) }
-    var now by remember { mutableStateOf(Instant.now()) }
-    LaunchedEffect(Unit) { while (true) { delay(60_000); now = Instant.now() } }
     fun navigate(to: String) {
         nav.navigate(to) {
             popUpTo(nav.graph.findStartDestination().id) { saveState = true }
@@ -72,13 +84,44 @@ fun NewsRoot(vm: FeedViewModel, target: String?, onTargetConsumed: () -> Unit, n
     }
     LaunchedEffect(target) {
         if (target != null) {
+            vm.cancelDelete()
             navigate(target)
             FeedKind.entries.firstOrNull { it.route == target }?.let { vm.refresh(it) }
             onTargetConsumed()
         }
     }
+    LaunchedEffect(vm) {
+        vm.events.collect { event ->
+            when (event) {
+                is FeedEvent.Deleted -> {
+                    if (nav.currentDestination?.route?.startsWith("${event.kind.route}/item/") == true) nav.popBackStack()
+                    snackbar.showSnackbar("Item deleted.")
+                }
+                FeedEvent.TokenSaved -> snackbar.showSnackbar("Token saved securely.")
+                FeedEvent.TokenCleared -> snackbar.showSnackbar("Saved token removed.")
+            }
+        }
+    }
+    pendingDelete?.let { item ->
+        AlertDialog(
+            onDismissRequest = vm::cancelDelete,
+            title = { Text("Delete this ${if (item.kind == FeedKind.DEALS) "deal" else "pick"}?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(item.title)
+                    Text("This removes the published item for everyone.")
+                    deleteError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    TextButton(onClick = { vm.cancelDelete(); nav.navigate("settings") }, enabled = !deleting) { Text("Settings") }
+                }
+            },
+            confirmButton = { TextButton(onClick = vm::confirmDelete, enabled = !deleting) { Text(if (deleting) "Deleting…" else "Delete", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = vm::cancelDelete, enabled = !deleting) { Text("Cancel") } },
+        )
+    }
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
+            if (isTab)
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 tabs.forEach { tab ->
                     NavigationBarItem(
@@ -91,25 +134,28 @@ fun NewsRoot(vm: FeedViewModel, target: String?, onTargetConsumed: () -> Unit, n
             }
         },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("NEWS APP", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp, letterSpacing = 3.sp, fontWeight = FontWeight.Bold)
-                    Text("A little signal. Every day.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+        Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
+            if (isTab) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("NEWS APP", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp, letterSpacing = 3.sp, fontWeight = FontWeight.Bold)
+                        Text("A little signal. Every day.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                    }
+                    Text(clock.today.format(DateTimeFormatter.ofPattern("MMM d", Locale.ENGLISH)).uppercase(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    IconButton(onClick = { nav.navigate("settings") { launchSingleTop = true } }) { Icon(Icons.Outlined.Settings, "Settings") }
                 }
-                Text(LocalDate.now().format(DateTimeFormatter.ofPattern("MMM d", Locale.ENGLISH)).uppercase(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (!notificationsEnabled && !hidePermission) {
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(16.dp), modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 8.dp)) {
-                    Column(Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.NotificationsNone, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                            Text("Your daily heads-up", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 8.dp))
-                        }
-                        Text("Get new deals, Machine's pick, and a morning digest.", fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-                        Row {
-                            TextButton(onClick = enableNotifications) { Text("Enable alerts") }
-                            TextButton(onClick = { hidePermission = true }) { Text("Later") }
+                if (!notificationsEnabled && !hidePermission) {
+                    Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(16.dp), modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 8.dp)) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Outlined.NotificationsNone, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                Text("Your daily heads-up", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 8.dp))
+                            }
+                            Text("Get new deals, Machine's pick, and a morning digest.", fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                            Row {
+                                TextButton(onClick = enableNotifications) { Text("Enable alerts") }
+                                TextButton(onClick = { hidePermission = true }) { Text("Later") }
+                            }
                         }
                     }
                 }
@@ -124,24 +170,55 @@ fun NewsRoot(vm: FeedViewModel, target: String?, onTargetConsumed: () -> Unit, n
                                 NewsFilter.entries.forEach { filter -> FilterChip(selected = selected == filter, onClick = { vm.selectFilter(filter) }, label = { Text(filter.label) }) }
                             }
                         }, listKey = selected.name) {
-                        items(news.items, key = { it.url }) { ArticleCard(it, now) }
+                        groupedCards(newsGroups, { it.url }, "No headlines today yet. Catch up with earlier stories below.") { ArticleCard(it, now) }
                     }
                 }
                 composable("deals") {
                     FeedPage("Good things. Free.", "AI · DEV TOOLS · SOFTWARE", deals.fetchedAt, statuses["deals"] ?: RefreshStatus(),
-                        { vm.refresh(FeedKind.DEALS) }, deals.items.isEmpty(), "No free offers right now", "New free tools and offers will land here. Pull down to check again.") {
-                        items(deals.items, key = { it.url }) { DealCard(it) }
+                        { vm.refresh(FeedKind.DEALS) }, visibleDeals.isEmpty(), "No free offers right now", "New free tools and offers will land here. Pull down to check again.") {
+                        groupedCards(dealGroups, { it.url }, "No new deals today. Earlier free finds are below.") { deal ->
+                            DealCard(deal, { nav.navigate("deals/item/${Uri.encode(deal.url)}") }, { vm.requestDelete(DeleteTarget(FeedKind.DEALS, deal.id, deal.url, deal.title)) })
+                        }
                     }
                 }
                 composable("picks") {
                     FeedPage("Machine's picks", "ONE THING WORTH YOUR TIME", picks.fetchedAt, statuses["picks"] ?: RefreshStatus(),
-                        { vm.refresh(FeedKind.PICKS) }, picks.items.isEmpty(), "Today's pick is on its way", "One launch, tool, idea, or resource. Hand-picked every day.") {
-                        items(picks.items, key = { it.date }) { PickCard(it) }
+                        { vm.refresh(FeedKind.PICKS) }, visiblePicks.isEmpty(), "Today's pick is on its way", "One launch, tool, idea, or resource. Hand-picked every day.") {
+                        groupedCards(pickGroups, { it.date }, "Today's pick is on its way. Explore an earlier pick below.") { pick ->
+                            PickCard(pick, { nav.navigate("picks/item/${pick.date}") }, { vm.requestDelete(DeleteTarget(FeedKind.PICKS, pick.id, pick.date, pick.title)) })
+                        }
                     }
                 }
+                composable("deals/item/{url}") { entry ->
+                    val deal = deals.items.firstOrNull { it.url == entry.arguments?.getString("url") }
+                    DealDetailScreen(deal, { nav.popBackStack() }) { deal?.let { vm.requestDelete(DeleteTarget(FeedKind.DEALS, it.id, it.url, it.title)) } }
+                }
+                composable("picks/item/{date}") { entry ->
+                    val pick = picks.items.firstOrNull { it.date == entry.arguments?.getString("date") }
+                    PickDetailScreen(pick, { nav.popBackStack() }) { pick?.let { vm.requestDelete(DeleteTarget(FeedKind.PICKS, it.id, it.date, it.title)) } }
+                }
+                composable("settings") { SettingsScreen(tokenSettings, vm::saveToken, vm::clearToken) { nav.popBackStack() } }
             }
         }
     }
+}
+
+private fun <T> LazyListScope.groupedCards(groups: DayGroups<T>, itemKey: (T) -> String, emptyToday: String, card: @Composable (T) -> Unit) {
+    if (groups.today.isEmpty()) {
+        item("today_empty") { Text(emptyToday, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp)) }
+    } else {
+        item("today_header") { SectionHeader("Today", groups.today.size) }
+        items(groups.today, key = itemKey) { card(it) }
+    }
+    if (groups.earlier.isNotEmpty()) {
+        item("earlier_header") { SectionHeader("Earlier", groups.earlier.size) }
+        items(groups.earlier, key = itemKey) { card(it) }
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String, count: Int) {
+    Text("$title · $count", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -211,19 +288,18 @@ private fun ArticleCard(article: Article, now: Instant) {
 }
 
 @Composable
-private fun DealCard(deal: Deal) {
+private fun DealCard(deal: Deal, onOpen: () -> Unit, onDelete: () -> Unit) {
     val context = LocalContext.current
-    Card(shape = RoundedCornerShape(20.dp)) {
+    Card(onClick = onOpen, shape = RoundedCornerShape(20.dp)) {
         Column(Modifier.fillMaxWidth().padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(50)) {
-                    Text(deal.tag, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
-                }
+                TagPill(deal.tag)
                 Spacer(Modifier.weight(1f))
                 Text("FREE", color = MaterialTheme.colorScheme.secondary, fontSize = 10.sp, letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
+                DeleteMenu(onDelete)
             }
             Text(deal.title, fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 14.dp))
-            Text(deal.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+            Text(deal.description, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
             Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(deal.source, style = MaterialTheme.typography.labelMedium)
@@ -236,15 +312,17 @@ private fun DealCard(deal: Deal) {
 }
 
 @Composable
-private fun PickCard(pick: Pick) {
-    val context = LocalContext.current
-    val date = runCatching { LocalDate.parse(pick.date).format(DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.ENGLISH)) }.getOrDefault(pick.date)
-    Card(onClick = { openArticle(context, pick.url) }, shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+private fun PickCard(pick: Pick, onOpen: () -> Unit, onDelete: () -> Unit) {
+    val date = formattedDate(pick.date)
+    Card(onClick = onOpen, shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxWidth().padding(20.dp)) {
-            Text(date.uppercase(), fontSize = 10.sp, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.secondary)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(date.uppercase(), fontSize = 10.sp, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.weight(1f))
+                DeleteMenu(onDelete)
+            }
             Text(pick.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 14.dp))
-            Text(pick.body, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 12.dp))
-            Text("Take a look ↗", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 20.dp))
+            Text(pick.body, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 12.dp))
+            Text("Read this pick ↗", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 20.dp))
         }
     }
 }

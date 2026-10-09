@@ -98,12 +98,16 @@ You can also supply any HTTPS JSON host using these exact shapes. No publish tok
     "url": "https://example.com/tool",
     "source": "Example",
     "tag": "Dev tools",
-    "expires": null
+    "expires": null,
+    "offer_details": "Free access to the tool and its starter templates.",
+    "claim_steps": ["Open the offer page", "Create a free account", "Activate the free tier"],
+    "id": 37,
+    "created_at": "2026-10-09T03:30:00Z"
   }
 ]
 ```
 
-Deals are free software offers only. Accepted tags are `AI`, `Dev tools`, `SaaS`, `Software`, `Cloud`, `Data`, `Security`, `Design`, and `Learning`. The backend rejects telco/phone offers and descriptions without an explicit free/no-cost/zero-cost/$0 claim. As the publisher, verify the actual offer is free; text validation cannot verify a third-party pricing page. The app rejects unsupported/telco feed items and hides expired deals after their final local calendar day. The tag pill and **Claim** button open the offer URL.
+Deals are free software offers only. Accepted tags are `AI`, `Dev tools`, `SaaS`, `Software`, `Cloud`, `Data`, `Security`, `Design`, and `Learning`. The backend rejects telco/phone offers and descriptions without an explicit free/no-cost/zero-cost/$0 claim. As the publisher, verify the actual offer is free; text validation cannot verify a third-party pricing page. The app rejects unsupported/telco feed items and hides expired deals after their final local calendar day. Tap a deal card to open its full detail screen. It shows the source, tag, full description, optional **What you get**, numbered **How to claim** steps, and expiry. **Claim** opens the offer URL. `offer_details` and `claim_steps` accept JSON null or can be omitted; missing/empty sections are hidden. `id` and `created_at` are server-generated response fields, not POST input fields.
 
 **Picks**:
 
@@ -113,12 +117,24 @@ Deals are free software offers only. Accepted tags are `AI`, `Dev tools`, `SaaS`
     "title": "One thing worth your time",
     "body": "Why this launch, tool, idea, or learning resource matters.",
     "url": "https://example.com/resource",
-    "date": "2026-10-09"
+    "date": "2026-10-09",
+    "id": 19,
+    "created_at": "2026-10-09T03:30:00Z"
   }
 ]
 ```
 
-Publish one pick each day using your intended calendar date. The backend rejects a second pick for that date (`409`); the app validates unique dates, hides future-dated notes, and renders newest first. The backend does not generate editorial content or automate publication for you.
+Publish one pick each day using your intended calendar date. The backend rejects a second pick for that date (`409`); the app validates unique dates, hides future-dated notes, and renders newest first. Tap a pick card to open its full dated note and link button. The backend does not generate editorial content or automate publication for you.
+
+### Today / Earlier and local publishing settings
+
+All three tabs group visible items into **Today** and **Earlier**, with item counts in each section header. When Today is empty, a short friendly message replaces that header. News uses `publishedAt`; Deals and Picks use the server's `created_at` UTC timestamp converted to the device's current timezone. A pick's editorial `date` remains visible in its note but does not determine its publish-day group. The UI updates at local midnight, on resume, and as timezone changes are observed. Older cached/externally hosted items with no publish timestamp go to Earlier; no date is invented from cache time.
+
+Use the gear icon to open **Settings**, which is separate from the three bottom tabs. Enter the backend publishing token in the masked field once and tap **Save token**. It is stored in **EncryptedSharedPreferences**, with its encryption key in Android Keystore. The saved value is never loaded back into the UI; entered text is cleared after submission, is not saved in instance state, and Settings blocks screenshots. Credential preferences are excluded from cloud backup and device transfer. You can replace or remove the saved token. It is not in BuildConfig, Room, Git, logs, feed requests, or Firebase messages.
+
+A deal/pick card's overflow menu offers **Delete**, followed by a confirmation dialog. Confirming sends the saved token only on an HTTPS `DELETE /api/deals/{id}` or `DELETE /api/picks/{id}` request. HTTP redirects are disabled for these requests so the token cannot be forwarded to another host. A successful delete removes the cached item immediately without waiting for another refresh. If the server already removed it (404), the stale cached item is removed too. Failed/unauthorized/offline deletes leave the cache intact and show a retryable error. Deletes are never queued while offline.
+
+Legacy cached items without IDs resolve their ID from the updated public GET feed after confirmation. If the server still doesn't return IDs, the dialog asks you to update the backend and refresh. A generic JSON host can still supply read-only feeds/detail screens; deletion requires the publisher's `/api/deals` or `/api/picks` endpoint. This is publisher access: deleting removes content for every reader, not just this device.
 
 All three feeds open from Room without a network connection. Valid refreshes replace their cached JSON atomically, including a legitimate empty array. HTTP, parsing, quota, and connectivity errors preserve the last good cache and show a readable message with Retry. Deals and Picks also support pull-to-refresh.
 
@@ -160,6 +176,7 @@ cp .env.example .env
 Edit `.env` with a real `PUBLISH_TOKEN` (for example generate one with `openssl rand -hex 32`), then:
 
 ```bash
+python migrate.py
 uvicorn main:app --env-file .env --host 0.0.0.0 --port 8000 --workers 1
 ```
 
@@ -172,6 +189,8 @@ Open `http://localhost:8000/docs` for the API schema. The production Android app
 | GET /api/picks | Public | Full picks array, date descending |
 | POST /api/deals | X-Publish-Token | Validate/store one deal and push to `deals` |
 | POST /api/picks | X-Publish-Token | Validate/store one daily pick and push to `picks` |
+| DELETE /api/deals/{id} | X-Publish-Token | Remove a deal; 204 on success, 404 if absent |
+| DELETE /api/picks/{id} | X-Publish-Token | Remove a pick; 204 on success, 404 if absent |
 
 Successful POST: `201 { "item": { ... }, "push": "sent" | "queued" | "not_configured" }`. Missing/wrong token returns `401`, invalid content returns `422`, and duplicate deal URL or pick date returns `409` without a second push.
 
@@ -179,23 +198,62 @@ Content and a push-outbox row commit in the **same database transaction**. The A
 
 Run **one Uvicorn worker**, as configured on Render, to serialize outbox delivery. Free-tier service sleep can defer retries until the next request wakes the process. Neither the publisher nor FCM guarantees delivery to a phone that has disabled notifications or force-stopped the app.
 
+## Migrate the existing Neon database before deploying
+
+Migration execution is **manual**. The updated backend verifies its Alembic revision at startup and fails with a clear migration instruction if the database is still on the old schema. It does not execute DDL on startup or silently create a replacement database. No migration has been applied to your live Neon database by this feature update.
+
+The real migrations live in `backend/migrations/versions/`:
+
+- **0001_initial** adopts the existing original `deals`, `picks`, and `push_outbox` tables without dropping/recreating them; it creates these tables for a new database. It checks existing tables for required original columns.
+- **0002_deal_details** adds nullable `deals.offer_details` (**TEXT**) and `deals.claim_steps` (**JSON**). Existing values remain NULL; content, IDs, unique constraints, creation timestamps, and pending pushes are preserved.
+
+Both migrations and their version record run in one transaction. Postgres migrations use a transaction-scoped advisory lock to serialize concurrent migration commands. They can be run again safely. **Do not use `alembic stamp head` to skip the migration**: it marks a version without adding the columns. An incompatible existing schema fails before being marked current.
+
+Run these commands from the updated checkout on your computer, using the intended Neon connection (a direct/non-pooled connection is preferable for schema maintenance; see [Neon connection guidance](https://neon.com/docs/connect/connection-pooling)). Keep the connection value in the environment or private `backend/.env`, never in Git or chat:
+
+```bash
+cd backend
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+# Set DATABASE_URL to your existing Neon connection including sslmode=require.
+# You may instead place DATABASE_URL in the ignored backend/.env file.
+export DATABASE_URL='postgresql://USER:PASSWORD@NEON_HOST/DB_NAME?sslmode=require'
+python migrate.py --require-postgres
+```
+
+`--require-postgres` refuses to accidentally migrate a local SQLite fallback. `migrate.py` loads a local `.env` only for variables not already set in the environment. Success prints `Migration complete: 0002_deal_details (postgresql)` without printing the URL or credentials.
+
+Verify the added columns and revision in Neon's SQL editor if desired:
+
+```sql
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'deals'
+  AND column_name IN ('offer_details', 'claim_steps');
+SELECT version_num FROM alembic_version;
+```
+
+The old backend can continue using the expanded schema: both new columns are nullable and its existing columns are unchanged. Run the migration **before deploying the updated backend**. Keep your normal database backup/recovery point; rolling back the migration would remove the new detail fields, so a code rollback can normally leave the additive schema in place.
+
 ## Deploy the backend to Render's free tier
 
-The repository includes **render.yaml** at its root. It provisions a free Python web service and a free Postgres instance; the Android project is not part of the Render build.
+The existing **render.yaml** keeps a free Python web service and accepts an externally managed **DATABASE_URL** (your Neon database). It does not provision a new Render database. Preserve your current Render **DATABASE_URL**, **PUBLISH_TOKEN**, and **FIREBASE_SERVICE_ACCOUNT_JSON**.
 
-1. Publish the repository to your Git host yourself.
-2. In Render, select **New → Blueprint**, connect the repository, and select its `render.yaml`.
-3. Supply **PUBLISH_TOKEN** and **FIREBASE_SERVICE_ACCOUNT_JSON** when prompted. Use the same Firebase project registered in the app. If Firebase is not ready, remove just the Firebase env-var entry from the blueprint before deploying, then add it in Render's Environment settings later; polling and publishing work without it.
-4. Render sets **DATABASE_URL** from Postgres and runs `pip install -r requirements.txt` in `backend`, followed by `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`.
-5. Visit `https://YOUR-SERVICE.onrender.com/health` and confirm `{"status":"ok"}`. The backend creates the tables at startup.
-6. Set the Android `DEALS_FEED_URL` and `PICKS_FEED_URL` constants to this service's `/api/deals` and `/api/picks` endpoints, rebuild, and install.
-7. Run the publish commands below. Verify GET feeds update and notifications open the right tab.
+1. Run the Neon migration above yourself.
+2. Publish the updated repository to your Git host yourself, then deploy the updated backend to your existing Render service.
+3. Render installs `backend/requirements.txt` and runs `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`. Startup checks that the database has revision `0002_deal_details`.
+4. Visit `https://YOUR-SERVICE.onrender.com/health` and confirm `{"status":"ok"}`.
+5. Check `/api/deals` and `/api/picks`: responses now include `id` and ISO-8601 UTC `created_at`; deals also include nullable `offer_details` and `claim_steps`.
+6. Rebuild/install the Android APK using the same signing key. Enter **PUBLISH_TOKEN** in the app's Settings only if you want publisher deletion access.
 
-Render's [free-tier limitations](https://render.com/docs/free) matter: free web services sleep after idle time, their disks are ephemeral, and free Postgres instances currently **expire after 30 days**. SQLite is therefore rejected when running on Render. For continued operation, upgrade/export the database before it expires or use an external persistent Postgres instance: replace the blueprint's `DATABASE_URL` entry with `sync: false`, remove the `databases` block, and supply that instance's connection URL. The free web-service configuration can stay unchanged. See [Render Blueprint syntax](https://render.com/docs/blueprint-spec) for infrastructure changes.
+For a fresh service, use **New → Blueprint**, select this repository, and supply the existing Neon URL and credentials as environment variables. Migrate that database before starting the service. If Firebase isn't configured yet, the backend's publishing/feeds still work and topic pushes remain queued.
+
+Render's [free web service](https://render.com/docs/free) may sleep after idle time and uses an ephemeral disk. Continue using Neon for durable storage; SQLite is rejected on Render. The app's HTTP timeouts allow the web service time to wake up. See [Render Blueprint syntax](https://render.com/docs/blueprint-spec) for configuration changes.
 
 ### Exact publishing commands
 
-Set these locally (never put the token in the Android app):
+Set these locally for curl (never hardcode or commit the token in the Android project):
 
 ```bash
 export API_BASE='https://YOUR-SERVICE.onrender.com'
@@ -215,7 +273,9 @@ curl --fail-with-body -X POST "$API_BASE/api/deals" \
     "url": "https://example.com/free-model",
     "source": "Example",
     "tag": "AI",
-    "expires": null
+    "expires": null,
+    "offer_details": "Free local model usage and downloadable examples.",
+    "claim_steps": ["Open the model page", "Download the model", "Follow the included setup instructions"]
   }'
 ```
 
@@ -246,6 +306,20 @@ curl --fail-with-body "$API_BASE/health"
 
 Replace example content/URLs before publishing. Repeating the same deal URL or pick date intentionally returns `409`.
 
+Delete an item using the `id` returned by GET or POST:
+
+```bash
+DEAL_ID=37
+PICK_ID=19
+curl --fail-with-body -X DELETE "$API_BASE/api/deals/$DEAL_ID" \
+  -H "X-Publish-Token: $PUBLISH_TOKEN"
+curl --fail-with-body -X DELETE "$API_BASE/api/picks/$PICK_ID" \
+  -H "X-Publish-Token: $PUBLISH_TOKEN"
+```
+
+Success is HTTP 204 with no response body. Nonexistent IDs return 404; missing/wrong tokens return 401. Pending pushes for an unambiguously identified deleted item are removed; already-delivered phone notifications cannot be recalled.
+
+
 ## Validation
 
 Android:
@@ -254,7 +328,7 @@ Android:
 ./gradlew assembleRelease testDebugUnitTest lintRelease
 ```
 
-Focused JVM tests cover cache preservation after failure/restart, separate filter caches and freshness, invalid feed rejection, unique pick dates, legitimate empty feeds, URL validation, expiry boundaries, time-ago formatting, and the next-local-9:00 schedule across daylight saving changes.
+Compose rendering tests exercise old/new deal details, full pick notes, card-to-detail navigation, and confirmation-before-deletion. Focused JVM tests cover local-midnight/DST grouping, nullable fields, successful and failed delete/cache behavior, and cache preservation after failure/restart, separate filter caches and freshness, invalid feed rejection, unique pick dates, legitimate empty feeds, URL validation, expiry boundaries, time-ago formatting, and the next-local-9:00 schedule across daylight saving changes.
 
 Backend:
 
@@ -264,7 +338,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-API tests use temporary SQLite databases and a fake FCM sender. They cover authentication, exact feed shapes, categories/free claims, invalid dates/URLs, duplicate protection, persistence across restarts, push failures/retries, and operation without Firebase. Live GNews/FCM testing needs your own key and project credentials.
+API tests use temporary SQLite databases and a fake FCM sender. Migration tests run against SQLite and, when `TEST_POSTGRES_URL` is supplied, isolated schemas in a local test Postgres database. They verify original-row/ID preservation, NULL defaults, repeatable migrations, fresh database setup, and transaction rollback on incompatible schemas. The Postgres test fixture creates and drops only its own temporary schema; never point test configuration at your live Neon database. Tests also cover new deal-field round trips, authenticated DELETE/204/404 behavior, and cancellation of unsent pushes. They cover authentication, exact feed shapes, categories/free claims, invalid dates/URLs, duplicate protection, persistence across restarts, push failures/retries, and operation without Firebase. Live GNews/FCM testing needs your own key and project credentials.
 
 Manual phone smoke test: install the release APK, visit each tab and news filter, refresh populated feeds, open an article/Claim/pick, turn networking off and relaunch to verify cached content, publish a new deal/pick while the app is foregrounded and backgrounded, and verify each notification tap. Enable/deny notification permission to check both paths. Test the morning digest on a device, allowing for Android's scheduling delays.
 
@@ -281,7 +355,9 @@ app/src/main/java/com/machine/newsapp/
 app/src/test/                    Focused JVM regression tests
 app/schemas/                     Versioned Room schema
 backend/                         FastAPI, SQLAlchemy, Admin SDK, outbox, API tests
-render.yaml                      Free Render web service + Postgres blueprint
+backend/migrate.py               Manual schema migration command
+backend/migrations/              Versioned Alembic schema migrations
+render.yaml                      Free Render service using external Neon Postgres
 ```
 
-No feed URLs, news API key, Firebase credentials, or public deployment have been invented. Configure those values to connect the completed app to your content.
+Existing feed URLs, local news/Firebase configuration, and signing keys are preserved. Supply credentials locally as needed; the publishing token is entered through Settings and never committed. You run the Neon migration and backend deployment yourself.

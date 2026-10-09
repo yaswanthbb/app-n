@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.2
 SQLAlchemy==2.0.40
 psycopg[binary]==3.2.6
 firebase-admin==6.8.0
+alembic==1.15.2
